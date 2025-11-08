@@ -42,7 +42,7 @@ class ShootingAnalyzer:
     def __init__(self):
         self.metrics_history = []
     
-    def generate_sample_data(self, athlete_id="A001", sessions=3):
+    def generate_sample_data(self, athlete_id="SHOOTER_001", sessions=3):
         """Generate realistic sample shooting data"""
         np.random.seed(42)
         data = []
@@ -51,40 +51,53 @@ class ShootingAnalyzer:
         
         for session in range(sessions):
             session_date = base_date + timedelta(days=session*3)
-            session_score = 620 + (session * 1.5) + np.random.normal(0, 1.0)
+            session_num = session + 1
             
             for shot in range(60):
-                hold_time = np.random.normal(4.2, 0.5)
-                trigger_time = np.random.normal(0.3, 0.05)
-                heart_rate = np.random.normal(68, 3)
+                series_num = (shot // 10) + 1
                 
-                shot_score = 10.0 + (session * 0.03) + np.random.normal(0, 0.2)
-                shot_score = max(9.0, min(10.9, shot_score))
+                # Base performance that improves each session
+                base_score = 10.3 + (session * 0.1)
+                
+                # Simulate fatigue across series
+                fatigue_penalty = (series_num - 1) * 0.03
+                
+                # Add some randomness
+                score_variation = np.random.normal(0, 0.15)
+                
+                final_score = base_score - fatigue_penalty + score_variation
+                final_score = max(9.0, min(10.9, final_score))
+                
+                # Realistic hold and trigger times
+                hold_time = 4.2 - (session * 0.1) + (series_num * 0.08) + np.random.normal(0, 0.2)
+                trigger_time = 0.3 - (session * 0.01) + (series_num * 0.005) + np.random.normal(0, 0.02)
                 
                 data.append({
-                    'session_id': f"S{session+1:03d}",
+                    'session_id': f"S{session_num:03d}",
                     'athlete_id': athlete_id,
                     'date': session_date.strftime('%Y-%m-%d'),
                     'shot_number': shot + 1,
-                    'score': round(shot_score, 1),
+                    'score': round(final_score, 1),
                     'hold_time': round(hold_time, 2),
                     'trigger_time': round(trigger_time, 3),
-                    'heart_rate': int(heart_rate),
-                    'fatigue_level': np.random.randint(1, 5),
-                    'series': (shot // 10) + 1
+                    'heart_rate': 65 + (series_num * 2) + np.random.randint(0, 3),
+                    'fatigue_level': min(5, 2 + series_num),
+                    'series': series_num
                 })
         
         return pd.DataFrame(data)
     
     def validate_data(self, df):
         """Validate uploaded data has required columns"""
-        required_columns = ['session_id', 'athlete_id', 'date', 'shot_number', 'score']
+        required_columns = ['session_id', 'athlete_id', 'shot_number', 'score']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
         
         # Add missing columns with default values if needed
+        if 'date' not in df.columns:
+            df['date'] = datetime.now().strftime('%Y-%m-%d')
         if 'hold_time' not in df.columns:
             df['hold_time'] = 4.0
         if 'trigger_time' not in df.columns:
@@ -102,50 +115,148 @@ class ShootingAnalyzer:
         """Calculate key performance metrics for each session"""
         session_metrics = []
         
-        for session_id in df['session_id'].unique():
+        for session_id in sorted(df['session_id'].unique()):
             session_data = df[df['session_id'] == session_id]
             
-            # Safe calculations with error handling
             try:
-                hold_std = session_data['hold_time'].std()
-                trigger_std = session_data['trigger_time'].std()
+                # Basic metrics
+                total_score = session_data['score'].sum()
+                average_score = session_data['score'].mean()
+                score_std = session_data['score'].std() if len(session_data) > 1 else 0.1
+                
+                # Stability metrics
+                hold_std = session_data['hold_time'].std() if len(session_data) > 1 else 0.5
+                trigger_std = session_data['trigger_time'].std() if len(session_data) > 1 else 0.05
+                hold_stability = 1 / hold_std if hold_std > 0 else 1
+                trigger_consistency = 1 / trigger_std if trigger_std > 0 else 1
+                
+                # Endurance calculation
+                endurance_drop = self._calculate_endurance_drop(session_data)
                 
                 metrics = {
                     'session_id': session_id,
-                    'date': session_data['date'].iloc[0] if len(session_data) > 0 else 'Unknown',
-                    'total_score': session_data['score'].sum(),
-                    'average_score': session_data['score'].mean(),
-                    'score_std': session_data['score'].std() if len(session_data) > 1 else 0,
-                    'hold_stability': 1 / hold_std if hold_std > 0 else 1,
-                    'trigger_consistency': 1 / trigger_std if trigger_std > 0 else 1,
+                    'date': session_data['date'].iloc[0] if 'date' in session_data.columns and len(session_data) > 0 else f"Session {session_id}",
+                    'total_score': total_score,
+                    'average_score': average_score,
+                    'score_std': score_std,
+                    'hold_stability': hold_stability,
+                    'trigger_consistency': trigger_consistency,
                     'heart_rate_variability': session_data['heart_rate'].std() if len(session_data) > 1 else 0,
-                    'endurance_drop': self._calculate_endurance_drop(session_data),
+                    'endurance_drop': endurance_drop,
                     'shots_count': len(session_data)
                 }
                 session_metrics.append(metrics)
+                
             except Exception as e:
                 st.error(f"Error calculating metrics for session {session_id}: {str(e)}")
                 continue
         
         if not session_metrics:
-            raise ValueError("No valid sessions found in the data")
+            st.error("No valid sessions found in the data")
+            return pd.DataFrame()
         
         return pd.DataFrame(session_metrics)
     
     def _calculate_endurance_drop(self, session_data):
         """Calculate performance drop between first and last series"""
         try:
-            first_series = session_data[session_data['series'] == 1]
-            last_series = session_data[session_data['series'] == session_data['series'].max()]
-            
-            if len(first_series) == 0 or len(last_series) == 0:
+            if 'series' not in session_data.columns:
                 return 0
-            
-            first_series_avg = first_series['score'].mean()
-            last_series_avg = last_series['score'].mean()
+                
+            series_groups = session_data.groupby('series')['score'].mean()
+            if len(series_groups) < 2:
+                return 0
+                
+            first_series_avg = series_groups.iloc[0]
+            last_series_avg = series_groups.iloc[-1]
             return first_series_avg - last_series_avg
-        except:
+            
+        except Exception as e:
             return 0
+    
+    def create_performance_charts(self, metrics_df, session_data):
+        """Create all performance visualization charts"""
+        charts = {}
+        
+        try:
+            # Chart 1: Score progression
+            if len(metrics_df) > 0:
+                fig_score = px.line(
+                    metrics_df, 
+                    x='date', 
+                    y='total_score',
+                    title='📈 Total Score Progression',
+                    markers=True,
+                    color_discrete_sequence=['#1f77b4']
+                )
+                fig_score.update_layout(
+                    height=400,
+                    xaxis_title="Session Date",
+                    yaxis_title="Total Score",
+                    showlegend=False
+                )
+                charts['score_progression'] = fig_score
+            
+            # Chart 2: Consistency trend
+            if len(metrics_df) > 0:
+                fig_consistency = px.line(
+                    metrics_df,
+                    x='date',
+                    y='score_std',
+                    title='🎯 Shot Consistency (Lower = Better)',
+                    markers=True,
+                    color_discrete_sequence=['#ff7f0e']
+                )
+                fig_consistency.update_layout(
+                    height=400,
+                    xaxis_title="Session Date",
+                    yaxis_title="Standard Deviation",
+                    showlegend=False
+                )
+                charts['consistency'] = fig_consistency
+            
+            # Chart 3: Series performance for latest session
+            if len(session_data) > 0:
+                latest_session = session_data['session_id'].iloc[-1]
+                latest_data = session_data[session_data['session_id'] == latest_session]
+                
+                if len(latest_data) > 0:
+                    series_avg = latest_data.groupby('series')['score'].mean().reset_index()
+                    fig_series = px.bar(
+                        series_avg,
+                        x='series',
+                        y='score',
+                        title=f'📊 Average Score by Series (Session {latest_session})',
+                        color='score',
+                        color_continuous_scale='Viridis'
+                    )
+                    fig_series.update_layout(
+                        height=400,
+                        xaxis_title="Series Number",
+                        yaxis_title="Average Score"
+                    )
+                    charts['series_performance'] = fig_series
+            
+            # Chart 4: Shot distribution
+            if len(session_data) > 0:
+                fig_distribution = px.histogram(
+                    session_data,
+                    x='score',
+                    title='🎯 Shot Score Distribution',
+                    nbins=20,
+                    color_discrete_sequence=['#2ca02c']
+                )
+                fig_distribution.update_layout(
+                    height=400,
+                    xaxis_title="Score",
+                    yaxis_title="Number of Shots"
+                )
+                charts['distribution'] = fig_distribution
+                
+        except Exception as e:
+            st.error(f"Error creating charts: {str(e)}")
+        
+        return charts
     
     def predict_next_session(self, metrics_df):
         """Predict expected performance for next session"""
@@ -315,36 +426,86 @@ def main():
             else:
                 st.metric("Next Session", "Need more data", delta="")
         
-        # Performance Charts
-        st.subheader("Performance Trends")
+        # Performance Charts Section
+        st.subheader("📊 Performance Analysis Charts")
         
-        col1, col2 = st.columns(2)
+        # Generate all charts
+        charts = analyzer.create_performance_charts(st.session_state.metrics, st.session_state.data)
         
-        with col1:
-            fig_score = px.line(st.session_state.metrics, x='date', y='total_score',
-                               title='Total Score Progression', markers=True)
-            fig_score.update_layout(height=300)
-            st.plotly_chart(fig_score, use_container_width=True)
-        
-        with col2:
-            fig_consistency = go.Figure()
-            fig_consistency.add_trace(go.Scatter(x=st.session_state.metrics['date'], 
-                                               y=st.session_state.metrics['score_std'],
-                                               mode='lines+markers',
-                                               name='Score Variation (Lower = Better)',
-                                               line=dict(color='red')))
-            fig_consistency.update_layout(title='Shot Consistency Trend', height=300)
-            st.plotly_chart(fig_consistency, use_container_width=True)
+        # Display charts in a grid layout
+        if charts:
+            # First row: Score progression and Consistency
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if 'score_progression' in charts:
+                    st.plotly_chart(charts['score_progression'], use_container_width=True)
+                else:
+                    st.info("Score progression chart not available")
+            
+            with col2:
+                if 'consistency' in charts:
+                    st.plotly_chart(charts['consistency'], use_container_width=True)
+                else:
+                    st.info("Consistency chart not available")
+            
+            # Second row: Series performance and Distribution
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                if 'series_performance' in charts:
+                    st.plotly_chart(charts['series_performance'], use_container_width=True)
+                else:
+                    st.info("Series performance chart not available")
+            
+            with col4:
+                if 'distribution' in charts:
+                    st.plotly_chart(charts['distribution'], use_container_width=True)
+                else:
+                    st.info("Score distribution chart not available")
+        else:
+            st.warning("No charts could be generated. Please check your data.")
         
         # AI Insights Section
-        st.subheader("AI-Powered Training Insights")
+        st.subheader("🤖 AI-Powered Training Insights")
         
         if st.button("Generate AI Analysis", type="primary"):
-            with st.spinner("🤖 Analyzing performance and generating recommendations..."):
+            with st.spinner("Analyzing performance and generating recommendations..."):
                 insights = analyzer.generate_ai_insights(st.session_state.metrics, st.session_state.data)
                 
                 st.info("💡 Training Recommendations")
                 st.text_area("Analysis Results", insights, height=300, key="ai_insights")
+        
+        # Drill Recommendations
+        st.subheader("🎯 Recommended Training Drills")
+        
+        latest_metrics = st.session_state.metrics.iloc[-1]
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.write("**Focus Areas:**")
+            if latest_metrics['endurance_drop'] > 0.3:
+                st.error("🎯 Endurance Training Needed")
+                st.write("• 40-shot continuous series")
+                st.write("• Progressive hold time exercises")
+            else:
+                st.success("✅ Endurance: Good")
+        
+        with col2:
+            st.write("**Technical Skills:**")
+            if latest_metrics['score_std'] > 0.4:
+                st.error("🎯 Consistency Drills")
+                st.write("• 10-shot repeatability sets")
+                st.write("• Rhythm timing exercises")
+            else:
+                st.success("✅ Consistency: Good")
+        
+        with col3:
+            st.write("**Mental Training:**")
+            st.write("• Pressure simulation drills")
+            st.write("• Breathing control exercises")
+            st.write("• Visualization techniques")
         
         # Data export
         st.sidebar.subheader("Data Management")
@@ -356,6 +517,13 @@ def main():
                 file_name=f"shooting_metrics_{athlete_id}.csv",
                 mime="text/csv"
             )
+        
+        # Data summary
+        st.sidebar.subheader("Data Summary")
+        st.sidebar.write(f"Sessions: {len(st.session_state.metrics)}")
+        st.sidebar.write(f"Total Shots: {len(st.session_state.data)}")
+        st.sidebar.write(f"Athlete: {athlete_id}")
+        
     else:
         st.error("No valid data to display. Please check your data format.")
 
